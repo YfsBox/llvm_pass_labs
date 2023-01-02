@@ -46,7 +46,7 @@ struct FrameworkTypeSupport<Direction::kForward> {
  * @tparam TMeetOp          Meet Operator
  */
 template <typename TDomainElem, typename TDomainElemRepr, Direction TDirection,
-          typename TMeetOp>
+          typename TMeetOp>  //
 class Framework {
 
   static_assert(std::is_base_of<MeetOp<TDomainElemRepr>, TMeetOp>::value,
@@ -73,9 +73,10 @@ private:
 
 protected:
   // Domain
-  std::vector<TDomainElem> Domain;
+  std::vector<TDomainElem> Domain;  // Domain是一个表达式的集合
   // Instruction-Domain Value Mapping
-  std::unordered_map<const Instruction *, DomainVal_t> InstDomainValMap;
+  std::unordered_map<const Instruction *, DomainVal_t> InstDomainValMap;  // 这个map表示的是某个指令bitmap
+  std::unordered_map<const Instruction *, unsigned> InstIndexMap;
   /*****************************************************************************
    * Auxiliary Print Subroutines
    *****************************************************************************/
@@ -130,8 +131,8 @@ private:
    * BasicBlock Boundary
    *****************************************************************************/
 protected:
-  virtual DomainVal_t getBoundaryVal(const BasicBlock &BB) const {
-    MeetOperands_t MeetOperands = getMeetOperands(BB);
+  virtual DomainVal_t getBoundaryVal(const BasicBlock &BB) const {      // 获取一个BasicBlock的Boundary
+    MeetOperands_t MeetOperands = getMeetOperands(BB);      // 前驱结点所组成的bitmap集合
     if (MeetOperands.begin() == MeetOperands.end()) {
       // If the list of meet operands is empty, then we are at the boundary,
       // hence obtain the BC.
@@ -145,12 +146,16 @@ private:
    * @todo(cscd70) Please provide an instantiation for the backward pass.
    */
   METHOD_ENABLE_IF_DIRECTION(Direction::kForward, MeetOperands_t)
-  getMeetOperands(const BasicBlock &BB) const {
+  getMeetOperands(const BasicBlock &BB) const {     //
     MeetOperands_t Operands;
     /**
      * @todo(cscd70) Please complete the definition of this method.
      */
-
+    for (auto pre_it = pred_begin(&BB); pre_it != pred_end(&BB); ++pre_it) {  //遍历每一个前驱块
+        // 获取out set
+        auto prebb = *pre_it;
+        Operands.push_back(InstDomainValMap[prebb]);
+    }
     return Operands;
   }
   /**
@@ -160,12 +165,16 @@ private:
   /**
    * @brief Apply the meet operator to the operands.
    */
-  DomainVal_t meet(const MeetOperands_t &MeetOperands) const {
+  DomainVal_t meet(const MeetOperands_t &MeetOperands) const {      // MeetOperands相当于一个累加的集合。
     /**
      * @todo(cscd70) Please complete the defintion of this method.
      */
-
-    return DomainVal_t(Domain.size());
+    DomainVal_t domainVal = bc();
+    TMeetOp tMeetOp;
+    for (auto &meetoperand : MeetOperands) {
+        domainVal = tMeetOp(domainVal, meetoperand);
+    }
+    return domainVal;  // 获取meet的结果
   }
   /*****************************************************************************
    * Transfer Function
@@ -203,9 +212,9 @@ private:
    *               accordingly) for the optimal traversal order.
    * @todo(cscd70) Please provide an instantiation for the backward pass.
    */
-  METHOD_ENABLE_IF_DIRECTION(Direction::kForward, BBTraversalConstRange)
+  METHOD_ENABLE_IF_DIRECTION(Direction::kForward, BBTraversalConstRange)        // 这是向前遍历所使用的
   getBBTraversalOrder(const Function &F) const {
-    return make_range(F.begin(), F.end());
+    return make_range(F.begin(), F.end());  // 返回的是迭代器
   }
   /**
    * @brief Return the traversal order of the instructions.
@@ -214,7 +223,7 @@ private:
    */
   METHOD_ENABLE_IF_DIRECTION(Direction::kForward, InstTraversalConstRange)
   getInstTraversalOrder(const BasicBlock &BB) const {
-    return make_range(BB.begin(), BB.end());
+    return make_range(BB.begin(), BB.end());        // 返回的是指令的迭代器
   }
   /**
    * @brief  Traverse through the CFG and update instruction-domain value
@@ -223,7 +232,21 @@ private:
    *
    * @todo(cscd70) Please implement this method.
    */
-  bool traverseCFG(const Function &F) { return false; }
+  bool traverseCFG(const Function &F) {
+      bool changed = false;
+      DomainVal_t ibv;
+      for (auto &bb : getBBTraversalOrder(F)) { // 这里用的基本块是forward的顺序
+          // 首先获取所有前驱结点meet起来的结果
+          ibv = getBoundaryVal(bb);
+          for (auto &ins : getInstTraversalOrder(bb)) {
+              DomainVal_t tmp_obv;
+              changed |= transferFunc(ins, ibv, tmp_obv);
+              InstDomainValMap[ins] = tmp_obv; // 更新out集合
+              ibv = tmp_obv;// 设置好下一个in集合
+          }
+      }
+      return changed;
+  }     // 在内部需要调用的是transferFunc
   /*****************************************************************************
    * Domain Initialization
    *****************************************************************************/
@@ -235,8 +258,10 @@ private:
    * @brief Initialize the domain from each instruction and/or argument.
    */
   void initializeDomain(const Function &F) {
-    for (const auto &Inst : instructions(F)) {
-      initializeDomainFromInst(Inst);
+    unsigned curr_idx = 0;
+    for (const auto &Inst : instructions(F)) {      // 根据函数中的每一个指令来对Domain进行初始化
+      initializeDomainFromInst(Inst);       // 每个指令都有use和def集合
+      InstIndexMap[&Inst] = curr_idx++;
     }
   }
 
@@ -245,17 +270,17 @@ protected:
 
   bool runOnFunction(const Function &F) {
     // initialize the domain
-    initializeDomain(F);
+    initializeDomain(F);        // 首先对Domain进行初始化
     // apply the initial conditions
     TMeetOp MeetOp;
     for (const auto &Inst : instructions(F)) {
-      InstDomainValMap.emplace(&Inst, MeetOp.top(Domain.size()));
+      InstDomainValMap.emplace(&Inst, MeetOp.top(Domain.size()));   // 此时该map每个key对应一个Instruction， 其中的集合为全false
     }
     // keep traversing until no changes have been made to the
     // instruction-domain value mapping
-    while (traverseCFG(F)) {
+    while (traverseCFG(F)) {        // 遍历cfg， 也就对应了算法核心迭代部分
     }
-    printInstDomainValMap(F);
+    printInstDomainValMap(F);       // 打印出来结果
     return false;
   }
 };

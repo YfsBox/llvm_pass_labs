@@ -10,7 +10,7 @@ using namespace llvm;
 /**
  * @brief A wrapper for binary expressions.
  */
-struct Expression {
+struct Expression { // 对表达式的封装
   const unsigned Opcode;
   const Value *const LHS = nullptr, *const RHS = nullptr;
   Expression(const BinaryOperator &BinaryOp)
@@ -19,7 +19,16 @@ struct Expression {
   /**
    * @todo(cscd70) Please complete the comparator.
    */
-  bool operator==(const Expression &Expr) const { return false; }
+  bool operator==(const Expression &Expr) const {
+      if (Opcode != Expr.Opcode) {
+          return false;
+      }
+      if (Opcode == Instruction::Add || Opcode == Instruction::Mul || Opcode == Instruction::FAdd
+      || Opcode == Instruction::FMul) {
+          return (LHS == Expr.LHS && RHS == Expr.RHS) || (RHS == Expr.LHS && LHS == Expr.RHS);
+      }
+      return LHS == Expr.LHS && RHS == Expr.RHS;
+  }
 };
 
 inline raw_ostream &operator<<(raw_ostream &Outs, const Expression &Expr) {
