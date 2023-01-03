@@ -7,8 +7,8 @@ namespace dfa {
 template <typename TDomainElemRepr> //
 class MeetOp {
 protected:
-  using DomainVal_t = std::vector<TDomainElemRepr>;
-
+    using DomainVal_t = std::vector<TDomainElemRepr>;
+    //using DomainVal_t = BitVector;
 public:
   virtual DomainVal_t operator()(const DomainVal_t &LHS,
                                  const DomainVal_t &RHS) const = 0;

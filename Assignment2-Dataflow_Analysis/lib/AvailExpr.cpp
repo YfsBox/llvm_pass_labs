@@ -8,6 +8,7 @@
 
 #include <dfa/Framework.h>
 #include <dfa/MeetOp.h>
+#include <map>
 
 #include "Expression.h"
 #include "Variable.h"
@@ -36,23 +37,20 @@ private:
     /**
      * @todo(cscd70) Please complete the definition of the transfer function.
      */
-    DomainVal_t old_out = OBV;
-    // 首先求出由gen和kill所组成的集合
+    DomainVal_t OLD_OBV = OBV;
     OBV = IBV;
-    unsigned operand_size = Inst.getNumOperands();
-    for (unsigned i = 0; i < operand_size; ++i) {
-        auto operand_ins = dyn_cast<Instruction>(Inst.getOperand(i));
-        if (operand_ins) {      // 可以为kill
-            auto map_idx = InstIndexMap[operand_ins];
-            OBV[map_idx] = false; // 相当于将kill从in中去除了
+    for (auto expr : Domain) {
+        if (expr.LHS == &Inst || expr.RHS == &Inst) {
+            auto ins_idx = InstIndexMap[expr.binaryOperator];
+            OBV[ins_idx] = false;
         }
     }
-    auto egen_idx = InstIndexMap[&Inst];
-    OBV[egen_idx] = true;
-    // 之后在进行运算，并比对结果
-    unsigned domainval_size = IBV.size();
-    for (unsigned i = 0; i < domainval_size; ++i) {
-        if (OBV[i] != old_out[i]) {
+    auto find_egen_it = InstIndexMap.find(&Inst);
+    if (find_egen_it != InstIndexMap.end()) {
+        OBV[find_egen_it->second] = true;
+    }
+    for (size_t i = 0; i < IBV.size(); ++i) {
+        if (OLD_OBV[i] != OBV[i]) {
             return true;
         }
     }

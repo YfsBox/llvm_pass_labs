@@ -154,7 +154,7 @@ private:
     for (auto pre_it = pred_begin(&BB); pre_it != pred_end(&BB); ++pre_it) {  //遍历每一个前驱块
         // 获取out set
         auto prebb = *pre_it;
-        Operands.push_back(InstDomainValMap[prebb]);
+        Operands.push_back(InstDomainValMap.find(prebb->getTerminator())->second);
     }
     return Operands;
   }
@@ -169,7 +169,7 @@ private:
     /**
      * @todo(cscd70) Please complete the defintion of this method.
      */
-    DomainVal_t domainVal = bc();
+    DomainVal_t domainVal = DomainVal_t(Domain.size(), true);
     TMeetOp tMeetOp;
     for (auto &meetoperand : MeetOperands) {
         domainVal = tMeetOp(domainVal, meetoperand);
@@ -239,10 +239,8 @@ private:
           // 首先获取所有前驱结点meet起来的结果
           ibv = getBoundaryVal(bb);
           for (auto &ins : getInstTraversalOrder(bb)) {
-              DomainVal_t tmp_obv;
-              changed |= transferFunc(ins, ibv, tmp_obv);
-              InstDomainValMap[ins] = tmp_obv; // 更新out集合
-              ibv = tmp_obv;// 设置好下一个in集合
+              changed |= transferFunc(ins, ibv, InstDomainValMap[&ins]);
+              ibv = InstDomainValMap[&ins];// 设置好下一个in集合
           }
       }
       return changed;
