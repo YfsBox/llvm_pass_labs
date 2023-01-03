@@ -34,6 +34,12 @@ struct FrameworkTypeSupport<Direction::kForward> {
   typedef iterator_range<BasicBlock::const_iterator> InstTraversalConstRange;
 };
 
+template<>
+struct FrameworkTypeSupport<Direction::kBackward> {
+    typedef iterator_range<Function::BasicBlockListType::const_reverse_iterator> BBTraversalConstRange;
+    typedef iterator_range<BasicBlock::InstListType::const_reverse_iterator> InstTraversalConstRange;
+};
+
 /**
  * @todo(cscd70) Please provide an instantiation for the backward pass.
  */
@@ -77,7 +83,7 @@ protected:
   std::vector<TDomainElem> Domain;  // Domain是一个表达式的集合
   // Instruction-Domain Value Mapping
   std::unordered_map<const Instruction *, DomainVal_t> InstDomainValMap;  // 这个map表示的是某个指令bitmap
-  std::unordered_map<const Instruction *, unsigned> InstIndexMap;
+  std::unordered_map<const Value *, unsigned> InstIndexMap;
   /*****************************************************************************
    * Auxiliary Print Subroutines
    *****************************************************************************/
@@ -114,6 +120,19 @@ private:
     errs() << "\t";
     printDomainWithMask(InstDomainValMap.at(&Inst));
     errs() << "\n";
+  }
+  METHOD_ENABLE_IF_DIRECTION(Direction::kBackward, void)
+  printInstDomainValMap(const Instruction &Inst) const {
+      const BasicBlock *const InstParent = Inst.getParent();
+      if (&Inst == &(InstParent->back())) {
+          errs() << "\t";
+          printDomainWithMask(getBoundaryVal(*InstParent));
+          errs() << "\n";
+      }
+      outs() << Inst << "\n";
+      errs() << "\t";
+      printDomainWithMask(InstDomainValMap.at(&Inst));
+      errs() << "\n";
   }
   /**
    * @brief Dump, ∀inst ∈ F, the associated domain value.
@@ -160,6 +179,18 @@ private:
     }
     return Operands;
   }
+  METHOD_ENABLE_IF_DIRECTION(Direction::kBackward, MeetOperands_t)
+  getMeetOperands(const BasicBlock &BB) const {
+      // 遍历的不再是前驱块而是后驱块
+      MeetOperands_t Operands;
+      for (auto succ_it = succ_begin(&BB); succ_it != succ_end(&BB); ++succ_it) {
+          auto succbb = *succ_it;
+          auto find_domain_it = InstDomainValMap.find(&succbb->front());
+          Operands.push_back(find_domain_it->second);
+      }
+      return Operands;
+  }
+
   /**
    * @brief Boundary Condition
    */
@@ -171,8 +202,9 @@ private:
     /**
      * @todo(cscd70) Please complete the defintion of this method.
      */
-    DomainVal_t domainVal = DomainVal_t(Domain.size(), true);
     TMeetOp tMeetOp;
+    DomainVal_t domainVal = tMeetOp.init(Domain.size());
+    errs() << "the MeetOperands size is " << MeetOperands.size() << '\n';
     for (auto &meetoperand : MeetOperands) {
         domainVal = tMeetOp(domainVal, meetoperand);
     }
@@ -218,6 +250,11 @@ private:
   getBBTraversalOrder(const Function &F) const {
     return make_range(F.begin(), F.end());  // 返回的是迭代器
   }
+  METHOD_ENABLE_IF_DIRECTION(Direction::kBackward, BBTraversalConstRange)        // 这是向前遍历所使用的
+  getBBTraversalOrder(const Function &F) const {
+      return make_range(F.getBasicBlockList().rbegin(),
+                        F.getBasicBlockList().rend());  // 返回的是迭代器
+  }
   /**
    * @brief Return the traversal order of the instructions.
    *
@@ -226,6 +263,12 @@ private:
   METHOD_ENABLE_IF_DIRECTION(Direction::kForward, InstTraversalConstRange)
   getInstTraversalOrder(const BasicBlock &BB) const {
     return make_range(BB.begin(), BB.end());        // 返回的是指令的迭代器
+  }
+
+  METHOD_ENABLE_IF_DIRECTION(Direction::kBackward, InstTraversalConstRange)
+  getInstTraversalOrder(const BasicBlock &BB) const {
+      return make_range(BB.getInstList().rbegin(),
+                        BB.getInstList().rend());
   }
   /**
    * @brief  Traverse through the CFG and update instruction-domain value
@@ -247,6 +290,16 @@ private:
       }
       return changed;
   }     // 在内部需要调用的是transferFunc
+
+  bool debug_loop(const Function &F) {
+      for (auto &bb : getBBTraversalOrder(F)) {
+          errs() << "# the bb is " << &bb << '\n';
+          //for (auto &ins : getInstTraversalOrder(bb)) {
+          errs() << "## the inst size is " << bb.size() << '\n';
+          //}
+      }
+      return false;
+  }
   /*****************************************************************************
    * Domain Initialization
    *****************************************************************************/
@@ -258,12 +311,8 @@ private:
    * @brief Initialize the domain from each instruction and/or argument.
    */
   void initializeDomain(const Function &F) {
-    unsigned curr_idx = 0;
     for (const auto &Inst : instructions(F)) {      // 根据函数中的每一个指令来对Domain进行初始化
-      initializeDomainFromInst(Inst);       // 每个指令都有use和def集合
-      if (dyn_cast<BinaryOperator>(&Inst) != nullptr) {
-          InstIndexMap[&Inst] = curr_idx++;
-      }
+        initializeDomainFromInst(Inst);       // 每个指令都有use和def集合
     }
   }
 
@@ -278,6 +327,7 @@ protected:
     for (const auto &Inst : instructions(F)) {
       InstDomainValMap.emplace(&Inst, MeetOp.top(Domain.size()));   // 此时该map每个key对应一个Instruction， 其中的集合为全false
     }
+    // debug_loop(F);
     // keep traversing until no changes have been made to the
     // instruction-domain value mapping
     while (traverseCFG(F)) {        // 遍历cfg， 也就对应了算法核心迭代部分

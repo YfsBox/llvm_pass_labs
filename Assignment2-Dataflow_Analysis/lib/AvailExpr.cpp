@@ -6,12 +6,10 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/Pass.h>
 
-#include <dfa/Framework.h>
-#include <dfa/MeetOp.h>
-#include <map>
+#include "dfa/Framework.h"
+#include "dfa/MeetOp.h"
 
 #include "Expression.h"
-#include "Variable.h"
 
 using namespace dfa;
 using namespace llvm;
@@ -29,7 +27,8 @@ private:
       /**
        * @todo(cscd70) Please complete the construction of domain.
        */
-       Domain.emplace_back(*BinaryOp);
+        InstIndexMap[&Inst] = Domain.size();
+        Domain.emplace_back(*BinaryOp);
     }
   }
   virtual bool transferFunc(const Instruction &Inst, const DomainVal_t &IBV,
