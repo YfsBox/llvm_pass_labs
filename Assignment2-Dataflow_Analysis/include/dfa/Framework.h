@@ -10,6 +10,7 @@
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/IR/InstrTypes.h>
 
 using namespace llvm;
 
@@ -124,6 +125,7 @@ private:
            << "**************************************************" << "\n";
     // clang-format on
     for (const auto &Inst : instructions(F)) {
+      errs() << Inst << '\n';
       printInstDomainValMap(Inst);
     }
   }
@@ -259,7 +261,9 @@ private:
     unsigned curr_idx = 0;
     for (const auto &Inst : instructions(F)) {      // 根据函数中的每一个指令来对Domain进行初始化
       initializeDomainFromInst(Inst);       // 每个指令都有use和def集合
-      InstIndexMap[&Inst] = curr_idx++;
+      if (dyn_cast<BinaryOperator>(&Inst) != nullptr) {
+          InstIndexMap[&Inst] = curr_idx++;
+      }
     }
   }
 
