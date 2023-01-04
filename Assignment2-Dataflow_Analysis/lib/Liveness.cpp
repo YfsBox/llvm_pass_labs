@@ -25,7 +25,7 @@ private:
     virtual void initializeDomainFromInst(const Instruction &Inst) override {
         for (auto op_it = Inst.op_begin(); op_it != Inst.op_end(); ++op_it) {
             auto operand = op_it->get();
-            if (isa<Argument>(operand) || isa<Instruction>(operand)) {
+            if (dyn_cast<Argument>(operand) || dyn_cast<Instruction>(operand)) {
                 auto findit = InstIndexMap.find(operand);
                 if (findit == InstIndexMap.end()) {
                     InstIndexMap[operand] = Domain.size();
@@ -48,22 +48,17 @@ public:
   }
 
   virtual bool runOnFunction(Function &F) override {
-    // clang-format off
-    errs() << "**************************************************" << "\n"
-           << "* Instruction-Domain Value Mapping" << "\n"
-           << "**************************************************" << "\n";
-    // clang-format on
     return LivenessFrameworkBase::runOnFunction(F);
   }
 };
 
 bool Liveness::transferFunc(const Instruction &Inst, const DomainVal_t &IBV, DomainVal_t &OBV) {
     std::map<unsigned, bool> OLD_OBV;
-    OBV = IBV;
     // 首先复制好OLD_OBV
     for (size_t i = 0; i < IBV.size(); ++i) {
         OLD_OBV[i] = OBV[i];
     }
+    OBV = IBV;
     // 将该Inst def的部分去除掉
     auto find_def_it = InstIndexMap.find(&Inst);
     if (find_def_it != InstIndexMap.end()) {  // 表示该指令存在一个def
@@ -72,21 +67,13 @@ bool Liveness::transferFunc(const Instruction &Inst, const DomainVal_t &IBV, Dom
     // 将use的部分合并上
     for (auto op_it = Inst.op_begin(); op_it != Inst.op_end(); ++op_it) {
         auto operand = op_it->get();
-        if (isa<Argument>(operand) || isa<Instruction>(operand)) {
+        if (dyn_cast<Argument>(operand) || dyn_cast<Instruction>(operand)) {
             auto findit = InstIndexMap.find(operand);
             if (findit != InstIndexMap.end()) {     // 如果该def之前是存在的话
                 OBV[findit->second] = true;
             }
         }
     }
-    for (size_t i = 0; i < IBV.size(); ++i) {
-        errs() << OBV[i];
-    }
-    errs() << '\n';
-    for (size_t i = 0; i < IBV.size(); ++i) {
-        errs() << OLD_OBV[i];
-    }
-    errs() << '\n';
 
     for (size_t i = 0; i < IBV.size(); ++i) {
         if (OBV[i] != OLD_OBV[i]) {

@@ -124,15 +124,15 @@ private:
   METHOD_ENABLE_IF_DIRECTION(Direction::kBackward, void)
   printInstDomainValMap(const Instruction &Inst) const {
       const BasicBlock *const InstParent = Inst.getParent();
+      errs() << "\t";
+      printDomainWithMask(InstDomainValMap.at(&Inst));
+      errs() << "\n";
+      outs() << Inst << "\n";
       if (&Inst == &(InstParent->back())) {
           errs() << "\t";
           printDomainWithMask(getBoundaryVal(*InstParent));
           errs() << "\n";
       }
-      outs() << Inst << "\n";
-      errs() << "\t";
-      printDomainWithMask(InstDomainValMap.at(&Inst));
-      errs() << "\n";
   }
   /**
    * @brief Dump, ∀inst ∈ F, the associated domain value.
@@ -144,7 +144,6 @@ private:
            << "**************************************************" << "\n";
     // clang-format on
     for (const auto &Inst : instructions(F)) {
-      errs() << Inst << '\n';
       printInstDomainValMap(Inst);
     }
   }
@@ -204,7 +203,6 @@ private:
      */
     TMeetOp tMeetOp;
     DomainVal_t domainVal = tMeetOp.init(Domain.size());
-    errs() << "the MeetOperands size is " << MeetOperands.size() << '\n';
     for (auto &meetoperand : MeetOperands) {
         domainVal = tMeetOp(domainVal, meetoperand);
     }
@@ -278,28 +276,23 @@ private:
    * @todo(cscd70) Please implement this method.
    */
   bool traverseCFG(const Function &F) {
-      bool changed = false;
+      bool has_changed = false;  // 用来表示是否有block发生了变化
       DomainVal_t ibv;
       for (auto &bb : getBBTraversalOrder(F)) { // 这里用的基本块是forward的顺序
           // 首先获取所有前驱结点meet起来的结果
           ibv = getBoundaryVal(bb);
+          bool is_changed = false; // 用来表示该block是否发生了变化
           for (auto &ins : getInstTraversalOrder(bb)) {
-              changed |= transferFunc(ins, ibv, InstDomainValMap[&ins]);
+              is_changed = transferFunc(ins, ibv, InstDomainValMap[&ins]);
               ibv = InstDomainValMap[&ins];// 设置好下一个in集合
           }
+          // 此时的ibv在Liveness中是该block的in，在AvialExpr中是block中的out，change也就是表示的该
+          // out或者in是否发生变化
+          has_changed |= is_changed;
       }
-      return changed;
+      return has_changed;
   }     // 在内部需要调用的是transferFunc
 
-  bool debug_loop(const Function &F) {
-      for (auto &bb : getBBTraversalOrder(F)) {
-          errs() << "# the bb is " << &bb << '\n';
-          //for (auto &ins : getInstTraversalOrder(bb)) {
-          errs() << "## the inst size is " << bb.size() << '\n';
-          //}
-      }
-      return false;
-  }
   /*****************************************************************************
    * Domain Initialization
    *****************************************************************************/
