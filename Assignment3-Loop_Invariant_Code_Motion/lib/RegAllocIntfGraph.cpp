@@ -36,21 +36,21 @@ void initializeRAIntfGraphPass(PassRegistry &Registry);
 namespace std {
 
 template <> //
-struct hash<Register> {
+struct hash<Register> {     // 表示寄存器的hash
   size_t operator()(const Register &Reg) const {
     return DenseMapInfo<Register>::getHashValue(Reg);
   }
 };
 
 template <> //
-struct greater<LiveInterval *> {
+struct greater<LiveInterval *> {    // Live表示的变量存活时间间隔，可以用来比较大小
   bool operator()(LiveInterval *const &LHS, LiveInterval *const &RHS) {
     /**
      * @todo(cscd70) Please finish the implementation of this function that is
      *               used for determining whether one live interval has spill
      *               cost greater than the other.
      */
-    return false;
+    return LHS->weight() < RHS->weight();
   }
 };
 
@@ -71,29 +71,29 @@ public:
 };
 
 class RAIntfGraph final : public MachineFunctionPass,
-                          private LiveRangeEdit::Delegate {
+                          private LiveRangeEdit::Delegate {  //  用于根据寄存器的存活间隔构建一个图
 private:
   MachineFunction *MF;
 
   SlotIndexes *SI;
-  VirtRegMap *VRM;
+  VirtRegMap *VRM;      // 虚拟寄存器到物理寄存器的Map
   const TargetRegisterInfo *TRI;
   MachineRegisterInfo *MRI;
   RegisterClassInfo RCI;
   LiveRegMatrix *LRM;
   MachineLoopInfo *MLI;
-  LiveIntervals *LIS;
+  LiveIntervals *LIS;       // 从中可以获取寄存器的活跃信息
 
   /**
    * @brief Interference Graph
    */
-  class IntfGraph {
+  class IntfGraph {     // example中使用了队列的结构来存储LiveInterval结点
   private:
     RAIntfGraph *RA;
 
     /// Interference Relations
     std::multimap<LiveInterval *, std::unordered_set<Register>,
-                  std::greater<LiveInterval *>>
+                  std::greater<LiveInterval *>>     // LiveInterval中本身就包含了一个寄存器对象
         IntfRels;
 
     /**
@@ -131,10 +131,10 @@ private:
      */
     void tryMaterializeAll();
     void clear() { IntfRels.clear(); }
-  } G;
+  } G;      // 图相关的数据结构
 
-  SmallPtrSet<MachineInstr *, 32> DeadRemats;
-  std::unique_ptr<Spiller> SpillerInst;
+  SmallPtrSet<MachineInstr *, 32> DeadRemats;     // 目标机器的指令集
+  std::unique_ptr<Spiller> SpillerInst;     // 被Spiller的指令
 
   void postOptimization() {
     SpillerInst->postOptimization();
@@ -247,7 +247,7 @@ bool RAIntfGraph::runOnMachineFunction(MachineFunction &MF) {
 
   SpillerInst.reset(createInlineSpiller(*this, MF, *VRM));
 
-  G.build();
+  G.build();        // 构建冲突图
   G.tryMaterializeAll();
 
   postOptimization();
@@ -263,6 +263,34 @@ void RAIntfGraph::IntfGraph::insert(const Register &Reg) {
   // 3. Update the weights of Reg (and its interfering neighbors), using the
   //    formula on "Lecture 6 Register Allocation Page 23".
   // 4. Insert 'Reg' into the graph.
+  auto inter = &(RA->LIS->getInterval(Reg));
+  // 在邻接表中增加这一项
+  IntfRels.insert({inter, {}});
+  // 将其加入到其他结点的邻居中， 也需要将其他结点加入到新结点的邻居中
+  for (size_t i = 0; i < RA->MRI->getNumVirtRegs(); ++i) { // 所有寄存器
+      Register tmp_reg = Register::index2VirtReg(i);
+      LiveInterval *tmp_liveness = &(RA->LIS->getInterval(Reg));
+      if (RA->MRI->reg_nodbg_empty(Reg) || tmp_reg == Reg) {    // 所有已经被使用的先跳过, 什么样的才算是被使用过的呢？
+          continue;
+      }
+      // 需不需要将带有Spill标记的不进行处理呢？
+      if (tmp_liveness->overlaps(inter)) { // 判断与Reg对应的liveness是否有交集
+            // 将Reg加入到tmp对应的邻居中
+            auto tmp_inter_it = IntfRels.find(tmp_liveness);
+            if (tmp_inter_it != IntfRels.end()) {
+                tmp_inter_it->second.insert(Reg);
+            }
+            // 将Reg的邻居中加入tmp
+            auto reg_inter_it = IntfRels.find(inter);
+            if (reg_inter_it != IntfRels.end()) {
+                reg_inter_it->second.insert(tmp_reg);
+            }
+      }
+  }
+
+
+
+
 }
 
 void RAIntfGraph::IntfGraph::erase(const Register &Reg) {
@@ -272,12 +300,36 @@ void RAIntfGraph::IntfGraph::erase(const Register &Reg) {
   // 1. ∀n ∈ neighbors(Reg), erase 'Reg' from n's interfering set and update its
   //    weights accordingly.
   // 2. Erase 'Reg' from the interference graph.
+  LiveInterval *reg_live = nullptr;
+  for (auto &inter_regs : IntfRels) { // 首先遍历每个Interval, 将其中邻居等于Reg的邻居移除
+      auto inter = inter_regs.first;
+      if (inter->reg() == Reg) {
+          reg_live = inter;
+      }
+      auto regs = inter_regs.second;
+      if (regs.count(Reg)) {  // 如果存在Reg作为其邻居
+          regs.erase(Reg);
+      }
+  }
+  // 最后将其中Reg对应的Interval项移除就好了
+  if (reg_live != nullptr) {
+      IntfRels.erase(reg_live);
+  }
 }
 
 void RAIntfGraph::IntfGraph::build() {
   /**
    * @todo(cscd70) Please implement this method.
    */
+    for (unsigned VirtualRegIdx = 0; VirtualRegIdx < RA->MRI->getNumVirtRegs();
+         ++VirtualRegIdx) { // 遍历虚拟寄存器
+        Register Reg = Register::index2VirtReg(VirtualRegIdx);    // 通过索引获取寄存器对象
+        // skip all unused registers
+        if (RA->MRI->reg_nodbg_empty(Reg)) {    // 所有已经被使用的先跳过, 什么样的才算是被使用过的呢？
+            continue;
+        }
+        insert(Reg);      // 加入结点
+    }
 }
 
 RAIntfGraph::IntfGraph::MaterializeResult_t
