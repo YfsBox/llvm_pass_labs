@@ -21,6 +21,7 @@
 
 #include <cmath>
 #include <queue>
+#include <stack>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -76,14 +77,13 @@ private:
   MachineFunction *MF;
 
   SlotIndexes *SI;
-  VirtRegMap *VRM;      // 虚拟寄存器到物理寄存器的Map
-  const TargetRegisterInfo *TRI;
-  MachineRegisterInfo *MRI;
+  VirtRegMap *VRM;      // 虚拟寄存器到物理寄存器的Map, 也就是我们最终想要的结果
+  const TargetRegisterInfo *TRI;    // 目标平台机相关的信息, 比如说目标机寄存器的name等等
+  MachineRegisterInfo *MRI;         // 可以理解为虚拟寄存器相关的信息集合
   RegisterClassInfo RCI;
   LiveRegMatrix *LRM;
-  MachineLoopInfo *MLI;
-  LiveIntervals *LIS;       // 从中可以获取寄存器的活跃信息
-
+  MachineLoopInfo *MLI;             // 之前通过数据流分析所得的循环信息，在这里的作用就是获取循环深度用来计算Weight
+  LiveIntervals *LIS;       // 之前所收集的, 从中可以获取寄存器的活跃信息
   /**
    * @brief Interference Graph
    */
@@ -95,6 +95,7 @@ private:
     std::multimap<LiveInterval *, std::unordered_set<Register>,
                   std::greater<LiveInterval *>>     // LiveInterval中本身就包含了一个寄存器对象
         IntfRels;
+    std::map<Register, double> RegsWeightMap;
 
     /**
      * @brief  Try to materialize all the virtual registers (internal).
@@ -109,7 +110,8 @@ private:
         std::tuple<LiveInterval *,
                    std::unordered_map<LiveInterval *, MCPhysReg>>;
     MaterializeResult_t tryMaterializeAllInternal();
-
+    MCRegister selectOrSplit(LiveInterval *const interval, SmallVectorImpl<Register> *const split_regs);    // 第二个参数用来返回split的结果
+    MCRegister tryGetColor(const LiveInterval *interval);
   public:
     explicit IntfGraph(RAIntfGraph *const RA) : RA(RA) {}
     /**
@@ -122,6 +124,7 @@ private:
      * @sa RAIntfGraph::LRE_CanEraseVirtReg
      */
     void erase(const Register &Reg);
+    void updateWeight();
     /**
      * @brief Build the whole graph.
      */
@@ -130,11 +133,20 @@ private:
      * @brief Try to materialize all the virtual registers.
      */
     void tryMaterializeAll();
-    void clear() { IntfRels.clear(); }
+
+    void simplify();
+
+    void clear() {
+        IntfRels.clear();
+        RegsWeightMap.clear();
+    }
   } G;      // 图相关的数据结构
 
   SmallPtrSet<MachineInstr *, 32> DeadRemats;     // 目标机器的指令集
-  std::unique_ptr<Spiller> SpillerInst;     // 被Spiller的指令
+  std::unique_ptr<Spiller> SpillerInst;
+  std::set<Register> SpillerRegSet;         // 被Spill的集合
+  std::map<Register, bool> IsOnStack;       // 用于运行算法时的栈
+  std::stack<LiveInterval*> RuningStack;
 
   void postOptimization() {
     SpillerInst->postOptimization();
@@ -151,7 +163,7 @@ private:
 
   /// The following two methods are inherited from @c LiveRangeEdit::Delegate
   /// and implicitly used by the spiller to edit the live ranges.
-  bool LRE_CanEraseVirtReg(Register Reg) override {
+  bool LRE_CanEraseVirtReg(Register Reg) override {     // 需要被spiller用来修改live range
     /**
      * @todo(cscd70) Please implement this method.
      */
@@ -247,8 +259,8 @@ bool RAIntfGraph::runOnMachineFunction(MachineFunction &MF) {
 
   SpillerInst.reset(createInlineSpiller(*this, MF, *VRM));
 
-  G.build();        // 构建冲突图
-  G.tryMaterializeAll();
+  // G.build();        // 构建冲突图
+  G.tryMaterializeAll();       // try目前的实现中只要走一遍算法就可以
 
   postOptimization();
   return true;
@@ -266,7 +278,7 @@ void RAIntfGraph::IntfGraph::insert(const Register &Reg) {
   auto inter = &(RA->LIS->getInterval(Reg));
   // 在邻接表中增加这一项
   IntfRels.insert({inter, {}});
-  // 将其加入到其他结点的邻居中， 也需要将其他结点加入到新结点的邻居中
+  // 将其加入到其他结点的邻居中， 也需要将其他结点加入到新结点的邻居中, 这一部分只对virtual部分进行了处理
   for (size_t i = 0; i < RA->MRI->getNumVirtRegs(); ++i) { // 所有寄存器
       Register tmp_reg = Register::index2VirtReg(i);
       LiveInterval *tmp_liveness = &(RA->LIS->getInterval(Reg));
@@ -287,10 +299,6 @@ void RAIntfGraph::IntfGraph::insert(const Register &Reg) {
             }
       }
   }
-
-
-
-
 }
 
 void RAIntfGraph::IntfGraph::erase(const Register &Reg) {
@@ -317,6 +325,25 @@ void RAIntfGraph::IntfGraph::erase(const Register &Reg) {
   }
 }
 
+void RAIntfGraph::IntfGraph::updateWeight() {       // 这一部分算是直接对ppt上公式的实现
+    // 更新Weight map, 这个map指的是Spill对应的Weight
+    for (auto &inter_map: IntfRels) {
+        LiveInterval *interval = inter_map.first;
+        Register reg = interval->reg();
+        double new_spill_weight = 0;
+        // 通过虚拟寄存器的def-use来计算出来Weight
+        for (auto reg_inst_it = RA->MRI->reg_instr_begin(reg);
+                    reg_inst_it != RA->MRI->reg_instr_end(); ++reg_inst_it) {
+            MachineInstr *McInst = &(*reg_inst_it);
+            unsigned loop_depth = RA->MLI->getLoopDepth(McInst->getParent());
+            auto read_write = McInst->readsWritesVirtualRegister(reg);  // 得出当前该指令对外层循环中的reg的读写情况
+            new_spill_weight += (read_write.first + read_write.second) * pow(10, loop_depth);
+        }
+        auto degree_cnt = static_cast<double>(IntfRels.find(interval)->second.size());
+        RegsWeightMap[reg] = new_spill_weight / degree_cnt;
+    }
+}
+
 void RAIntfGraph::IntfGraph::build() {
   /**
    * @todo(cscd70) Please implement this method.
@@ -325,39 +352,159 @@ void RAIntfGraph::IntfGraph::build() {
          ++VirtualRegIdx) { // 遍历虚拟寄存器
         Register Reg = Register::index2VirtReg(VirtualRegIdx);    // 通过索引获取寄存器对象
         // skip all unused registers
-        if (RA->MRI->reg_nodbg_empty(Reg)) {    // 所有已经被使用的先跳过, 什么样的才算是被使用过的呢？
+        if (RA->MRI->reg_nodbg_empty(Reg) || RA->SpillerRegSet.count(Reg)) {    // 所有已经被使用的先跳过, 什么样的才算是被使用过的呢？
             continue;
         }
+        RA->IsOnStack[Reg] = false;  // 初始化为不处于栈中
         insert(Reg);      // 加入结点
     }
 }
 
 RAIntfGraph::IntfGraph::MaterializeResult_t
-RAIntfGraph::IntfGraph::tryMaterializeAllInternal() {
+RAIntfGraph::IntfGraph::tryMaterializeAllInternal() {   // 这个地方代表的是单轮循环
   std::unordered_map<LiveInterval *, MCPhysReg> PhysRegAssignment;
-
   /**
    * @todo(cscd70) Please implement this method.
    */
   // ∀r ∈ IntfRels.keys, try to materialize it. If successful, cache it in
   // PhysRegAssignment, else mark it as to be spilled.
+  // 也就是seletc操作
+  LiveInterval *rt_interval = nullptr;
+  while (!RA->RuningStack.empty()) {
+      LiveInterval *interval = RA->RuningStack.top();
+      RA->RuningStack.pop();
+      // 弹出当前结点, 之后尝试对当前结点填充颜色
+      RA->LRM->invalidateVirtRegs();    // 每次循环都有可能涉及到对Liveness相关的修改，当修改之后需要请空其缓存
+      SmallVector<Register, 4> split_vir_regs;
 
-  return std::make_tuple(nullptr, PhysRegAssignment);
+      MCRegister PhysReg = selectOrSplit(interval, &split_vir_regs);       // Split也就是需要溢出的,这种情况下,需要将其进行split
+      if (PhysReg) {  // 如果是可以分配的寄存器,就可以进行赋值了,寄存器分配的目标就在于设置一个Map
+          RA->LRM->assign(*interval, PhysReg);  // 对于成功分配了颜色的直接修改好对应的map就行了
+      } else {
+          rt_interval = interval;
+      }
+      // enqueue the splitted live ranges
+      for (Register Reg : split_vir_regs) {      // 所返回的
+          LiveInterval *LI = &RA->LIS->getInterval(Reg);
+          if (RA->MRI->reg_nodbg_empty(LI->reg())) {
+              RA->LIS->removeInterval(LI->reg());       // 对于分裂的如何进行处理??为什么需要进行分裂呢?
+              continue;
+          }
+          insert(Reg);
+      } // 对于Split的应该进行怎样的处理呢?
+  }
+  return std::make_tuple(rt_interval, PhysRegAssignment);
 }
 
 void RAIntfGraph::IntfGraph::tryMaterializeAll() {
   std::unordered_map<LiveInterval *, MCPhysReg> PhysRegAssignment;
-
   /**
    * @todo(cscd70) Please implement this method.
    */
   // Keep looping until a valid assignment is made. In the case of spilling,
   // modify the interference graph accordingly.
+  using Vir2PhysAssignmentMap = std::unordered_map<LiveInterval *, MCPhysReg>;
+  bool spill_finish = false;
+  size_t round_cnt = 0;
+  while (!spill_finish && round_cnt < 10) {
+      dbgs() << "#Begin round " << round_cnt << "\n";
+      build(); // 构建冲突图
+      updateWeight();  // 更新溢出cost
+      simplify();  // 开始简化的过程
+      auto select_tuple = tryMaterializeAllInternal();
+      auto liveinterval = std::get<LiveInterval*>(select_tuple);             // select
+      if (liveinterval == nullptr) {    // 不需要spill的情况
+          spill_finish = true;
+          PhysRegAssignment = std::get<Vir2PhysAssignmentMap>(select_tuple);
+      }
+      round_cnt++;
+  }
 
-  for (auto &PhysRegAssignPair : PhysRegAssignment) {
+  for (auto &PhysRegAssignPair : PhysRegAssignment) {       // 此时完成了寄存器分配,之后进行赋值
     RA->LRM->assign(*PhysRegAssignPair.first, PhysRegAssignPair.second);
   }
 }
+
+void RAIntfGraph::IntfGraph::simplify() {
+    // 当整个graph都为空时, 直接返回
+    if (IntfRels.empty()) {
+        return;
+    }
+    LiveInterval *select_reg_inter = nullptr; // 被选中的寄存器
+    double min_weight = -1;
+    // 首先需要遍历一遍graph,从中选出来一个, 优先找出来Weight小的
+    for (auto &inter_maps : IntfRels) {
+        LiveInterval *inter = inter_maps.first;
+        Register reg = inter->reg();
+        // 首先判断此结点, 是否已经处于栈中
+        if (RA->IsOnStack[reg]) {
+            continue;
+        }
+        if (min_weight == -1 || RegsWeightMap[reg] < min_weight) {
+            select_reg_inter = inter;
+            min_weight = RegsWeightMap[reg];
+        }
+    }
+    if (min_weight == -1) {     // 表示的没有选出来
+        return;
+    }
+    // 然后压入栈中
+    Register select_reg = select_reg_inter->reg();
+    RA->IsOnStack[select_reg] = true;
+    RA->RuningStack.push(select_reg_inter);
+    // 之后调节graph, 从graph中移除该结点
+    IntfRels.erase(select_reg_inter);
+    simplify(); // 递归地调用
+}
+
+MCRegister RAIntfGraph::IntfGraph::selectOrSplit(LiveInterval *const interval,
+                                                 SmallVectorImpl<Register> *const split_regs) {
+    ArrayRef<MCPhysReg> Order =
+            RA->RCI.getOrder(RA->MF->getRegInfo().getRegClass(interval->reg()));  // 获取一个分配顺序
+    SmallVector<MCPhysReg, 16> Hints;
+    bool IsHardHint = RA->TRI->getRegAllocationHints(interval->reg(), Order, Hints, *RA->MF,
+                                                     RA->VRM, RA->LRM);
+    if (!IsHardHint) {
+        for (auto mcphysreg: Order) {
+            Hints.push_back(mcphysreg);
+        }
+    }
+    // 输出一下可以供分配的寄存器的name
+    outs() << "Hint Registers: [";
+    for (const MCPhysReg &PhysReg : Hints) {
+        outs() << RA->TRI->getRegAsmName(PhysReg) << ", ";
+    }
+    outs() << "]\n";
+
+    SmallVector<MCRegister, 8> PhysRegSpillCandidates;
+    // 遍历可以用来分配的物理寄存器,检查该物理寄存器和LI是否是否时刻分配的
+    for (auto PhysReg : Hints) {
+        switch (RA->LRM->checkInterference(*interval, PhysReg)) {
+            case LiveRegMatrix::IK_Free:      // 可以用来分配
+                outs() << "Allocating physical register " << RA->TRI->getRegAsmName(PhysReg)
+                       << "\n";
+                return PhysReg;     // 直接返回就好了
+            case LiveRegMatrix::IK_VirtReg:     // 表示该颜色不能分配
+                PhysRegSpillCandidates.push_back(PhysReg);  // 先加入到PhyRegSpillCandidates列表,该列表的作用是什么呢???
+                continue;
+            default:
+                continue;
+        }
+    }
+    // 主要问题在于这一部分操作有一些搞不懂
+    /*for (MCRegister PhysReg : PhysRegSpillCandidates) {             // 这一部分考虑进行split的操作
+        if (!spillInterferences(interval, PhysReg, split_regs)) {            // 会讲split的结果返回到SplitVirtual中
+            continue;
+        }
+        return PhysReg;
+    }*/
+    LiveRangeEdit LRE(interval, *split_regs, *RA->MF, *RA->LIS, RA->VRM,
+                      RA, &RA->DeadRemats);       // 用于修改Liveness范围的
+    RA->SpillerInst->spill(LRE);
+    return 0;
+
+}
+
 
 char RAIntfGraph::ID = 0;
 
