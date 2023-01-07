@@ -6,5 +6,5 @@
 - [x] Assignment3 LICM
 - [ ] Assignment3 RegAllocIntfGraph
 
-其中所做该实验所做笔记如下:
+更多详情可见如下:
 https://yfsbox.github.io/2022/12294483.html
